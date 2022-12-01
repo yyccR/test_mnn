@@ -5,6 +5,7 @@
 #include "opencv2/imgproc.hpp"
 #include "opencv2/highgui.hpp"
 #include <MNN/Interpreter.hpp>
+#include <MNN/ImageProcess.hpp>
 
 typedef struct BoxInfo {
     float x1;
@@ -212,7 +213,9 @@ void draw_coco_bboxes(const cv::Mat& bgr, const std::vector<BoxInfo>& bboxes)
 int main() {
 
     std::string image_file = "/Users/yang/CLionProjects/test_mnn/data/images/img.jpg";
-    std::string model_file = "/Users/yang/CLionProjects/test_mnn/yolox/yolox_tiny.mnn";
+//    std::string model_file = "/Users/yang/CLionProjects/test_mnn/yolox/yolox_tiny.mnn";
+    std::string model_file = "/Users/yang/CLionProjects/test_mnn/yolox/yolox-s_sim.mnn";
+    int input_size = 640;
 
     auto mnnNet = std::shared_ptr<MNN::Interpreter>(MNN::Interpreter::createFromFile(model_file.c_str()));
     MNN::ScheduleConfig netConfig;
@@ -226,60 +229,80 @@ int main() {
     mnnNet->getSessionInfo(session,MNN::Interpreter::SessionInfoCode::FLOPS, &FLOPS);
     std::cout << MEMORY << " " << FLOPS << std::endl;
 
-//    MNN::Tensor* input0 = mnnNet->getSessionInput(session,NULL);
-    const std::map<std::string, MNN::Tensor*> inputs = mnnNet->getSessionInputAll(session);
+    MNN::Tensor* input = mnnNet->getSessionInput(session,NULL);
+//    const std::map<std::string, MNN::Tensor*> inputs = mnnNet->getSessionInputAll(session);
 //    for(auto &k : inputs){
 //        std::cout << k.first << std::endl;
 //        for(auto &s : k.second->shape()){
 //            std::cout << s << std::endl;
 //        }
 //    }
+//    const float mean_vals[3] = {255.f * 0.485f, 255.f * 0.456, 255.f * 0.406f};
+//    const float norm_vals[3] = {1.f / (255.f * 0.229f), 1.f / (255.f * 0.224f), 1.f / (255.f * 0.225f)};
+//    auto pretreat = std::shared_ptr<MNN::CV::ImageProcess>(
+//            MNN::CV::ImageProcess::create(
+//                    MNN::CV::BGR,
+//                    MNN::CV::BGR,
+//                    mean_vals, 3,
+//                    norm_vals, 3
+//            )
+//    );
 
-    cv::Mat image = cv::imread(image_file);
-    float w_scale = (float)image.cols / (float)416;
-    float h_scale = (float)image.rows / (float)416;
+    cv::Mat image = cv::imread(image_file,1);
+    float w_scale = (float)image.cols / (float)input_size;
+    float h_scale = (float)image.rows / (float)input_size;
     cv::Mat image_resize;
-    cv::resize(image, image_resize, cv::Size(416,416));
-    image_resize.convertTo(image_resize, CV_32F, 1.0/255.0);
+    cv::resize(image, image_resize, cv::Size(input_size,input_size));
+//    pretreat->convert(image_resize.data, 416, 416, image_resize.step[0], inputs.at("images"));
+    image_resize.convertTo(image_resize, CV_32F, 1.0);
     cv::Mat image_channels[3];
     cv::split(image_resize, image_channels);
 
 
-    auto nchw_tensor = new MNN::Tensor(inputs.at("images"), MNN::Tensor::CAFFE);
+//    auto nchw_tensor = new MNN::Tensor(inputs.at("images"), MNN::Tensor::CAFFE);
+    auto nchw_tensor = new MNN::Tensor(input, MNN::Tensor::CAFFE);
     auto nchw_data   = nchw_tensor->host<float>();
     for (int j = 0; j < 3; j++) {
-        memcpy(nchw_data + 416*416 * j, image_channels[j].data,416*416 * sizeof(float));
+        memcpy(nchw_data + input_size*input_size * j, image_channels[j].data,input_size*input_size * sizeof(float));
     }
 
-    inputs.at("images")->copyFromHostTensor(nchw_tensor);
+//    inputs.at("images")->copyFromHostTensor(nchw_tensor);
+    input->copyFromHostTensor(nchw_tensor);
 
     mnnNet->runSession(session);
 
     const std::map<std::string, MNN::Tensor*> outputs = mnnNet->getSessionOutputAll(session);
     auto output_tensor = outputs.at("output");
     auto output = output_tensor->host<float>();
-//    std::cout << output[0] << std::endl;
-//    for(auto &k : outputs){
-//        std::cout << k.first << std::endl;
-//        for(auto &s : k.second->shape()){
-//            std::cout << s << std::endl;
-//        }
-//    }
+    std::cout << output[0] << std::endl;
+    for(auto &k : outputs){
+        std::cout << k.first << std::endl;
+        for(auto &s : k.second->shape()){
+            std::cout << s << std::endl;
+        }
+    }
     std::vector<BoxInfo> boxes;
     std::vector<YoloXAnchor> anchors;
     std::vector<int> strides = {8, 16, 32};
-    generate_anchors(416, 416, strides, anchors);
+    generate_anchors(input_size, input_size, strides, anchors);
     int num_classes = 80;
-    float score_threshold = 0.2;
-    for (unsigned int i = 0; i < 3549; ++i){
+    float score_threshold = 0.6;
+    std::cout<< "------start" << std::endl;
+    for(int i = 0; i < 85; i++){
+        std::cout << i << " " <<  *(output+i) << std::endl;
+    }
+    std::cout<< "------end" << std::endl;
+
+    for (unsigned int i = 0; i < 8400; ++i){
         const float *offset_obj_cls_ptr = output + (i * (num_classes + 5)); // row ptr
-        float obj_conf = offset_obj_cls_ptr[4];
+        float obj_conf = *(offset_obj_cls_ptr+4);
         if (obj_conf < score_threshold) continue; // filter first.
 
-        float cls_conf = offset_obj_cls_ptr[5];
-        unsigned int label = 0;
-        for (unsigned int j = 0; j < num_classes; ++j){
-            float tmp_conf = offset_obj_cls_ptr[j + 5];
+        float cls_conf = *(offset_obj_cls_ptr+5);
+        int label = 0;
+        for (int j = 0; j < num_classes; ++j){
+//            float tmp_conf = offset_obj_cls_ptr[j + 5];
+            float tmp_conf = *(offset_obj_cls_ptr+5+j);
             if (tmp_conf > cls_conf){
                 cls_conf = tmp_conf;
                 label = j;
@@ -293,80 +316,97 @@ int main() {
         const int grid1 = anchors.at(i).at(1);
         const int stride = anchors.at(i).at(2);
 
-        float dx = offset_obj_cls_ptr[0];
-        float dy = offset_obj_cls_ptr[1];
-        float dw = offset_obj_cls_ptr[2];
-        float dh = offset_obj_cls_ptr[3];
+//        float dx = offset_obj_cls_ptr[0];
+        float dx = *(offset_obj_cls_ptr+0);
+//        float dy = offset_obj_cls_ptr[1];
+        float dy = *(offset_obj_cls_ptr+1);
+//        float dw = offset_obj_cls_ptr[2];
+        float dw = *(offset_obj_cls_ptr+2);
+//        float dh = offset_obj_cls_ptr[3];
+        float dh = *(offset_obj_cls_ptr+3);
 
         float cx = (dx + (float) grid0) * (float) stride;
         float cy = (dy + (float) grid1) * (float) stride;
         float w = std::exp(dw) * (float) stride;
         float h = std::exp(dh) * (float) stride;
-        float x1 = ((cx - w / 2.f) - (float) dw_) / r_;
-        float y1 = ((cy - h / 2.f) - (float) dh_) / r_;
-        float x2 = ((cx + w / 2.f) - (float) dw_) / r_;
-        float y2 = ((cy + h / 2.f) - (float) dh_) / r_;
+        float x1 = (cx - w / 2.f);
+        float y1 = (cy - h / 2.f);
+        float x2 = (cx + w / 2.f);
+        float y2 = (cy + h / 2.f);
 
-        types::Boxf box;
+        BoxInfo box;
         box.x1 = std::max(0.f, x1);
         box.y1 = std::max(0.f, y1);
-        box.x2 = std::min(x2, (float) img_width - 1.f);
-        box.y2 = std::min(y2, (float) img_height - 1.f);
+        box.x2 = std::min(x2, (float) image.cols - 1.f);
+        box.y2 = std::min(y2, (float) image.rows - 1.f);
         box.score = conf;
         box.label = label;
-        box.label_text = class_names[label];
-        box.flag = true;
-        bbox_collection.push_back(box);
+        boxes.push_back(box);
 
-        count += 1; // limit boxes for nms.
-        if (count > max_nms)
-            break;
     }
 
-    std::vector<BoxInfo> boxes;
-    for(int i = 0; i < 3549; i++){
+//    std::vector<YoloXAnchor> anchors;
+//    std::vector<int> strides = {8, 16, 32};
+//    generate_anchors(416, 416, strides, anchors);
+//    std::vector<BoxInfo> boxes;
+//    for(int i = 0; i < 3549; i++){
+//
+//        if(*(output+i*85+4) > 0.6){
+//            int cur_label = 0;
+//            float score = *(output+i*85+4+1);
+//            for (int label = 0; label < 80; label++)
+//            {
+//                //LOGD("decode_infer label %d",label);
+//                //LOGD("decode_infer score %f",scores[label]);
+//                if (*(output+i*85+5+label) > score)
+//                {
+//                    score = *(output+i*85+5+label);
+//                    cur_label = label;
+//                }
+//            }
+//
+//            const int grid0 = anchors.at(i).at(0);
+//            const int grid1 = anchors.at(i).at(1);
+//            const int stride = anchors.at(i).at(2);
+//
+//            float x = (*(output+i*85+0) + (float) grid0) * (float) stride * w_scale;
+//            float y = (*(output+i*85+1) + (float) grid1) * (float) stride * h_scale;
+//            float w = std::exp(*(output+i*85+2)) * (float) stride * w_scale;
+//            float h = std::exp(*(output+i*85+3)) * (float) stride * h_scale;
+//
+////            float x1 = (cx - w / 2.f) * w_scale;
+////            float y1 = (cy - h / 2.f) * h_scale;
+////            float x2 = (cx + w / 2.f) * w_scale;
+////            float y2 = (cy + h / 2.f) * h_scale;
+//
+//
+////            float x = *(output+i*85+0)* 416.0f * w_scale;
+//////            float x = *(output+i*85+0)*  w_scale;
+////            float y = *(output+i*85+1)* 416.0f * h_scale;
+//////            float y = *(output+i*85+1)* h_scale;
+////            float w = *(output+i*85+2)* 416.0f * w_scale;
+//////            float w = *(output+i*85+2)*  w_scale;
+////            float h = *(output+i*85+3)* 416.0f * h_scale;
+//////            float h = *(output+i*85+3)*  h_scale;
+//
+//            boxes.push_back(BoxInfo{
+//                    (float)std::max(0.0, x-w/2.0),
+//                    (float)std::max(0.0, y-h/2.0),
+//                    (float)std::min((float)image.cols, (float)(x+w/2.0)),
+//                    (float)std::min((float)image.rows, (float)(y+h/2.0)),
+//                    *(output+i*85+4),
+//                    cur_label
+//            });
+////            std::cout << " x1: " << (float)std::max(0.0, x-w/2.0) <<
+////            " y1: " << (float)std::max(0.0, y-h/2.0) <<
+////            " x2: " << (float)std::min(320.0, x+w/2.0) <<
+////            " y2: " << (float)std::min(320.0, y+h/2.0) <<
+////            " socre: " << *(output+i*85+4) <<
+////            " label: " << cur_label << std::endl;
+//        }
+//    }
 
-        if(*(output+i*85+4) > 0.2){
-            int cur_label = 0;
-            float score = *(output+i*85+4+1);
-            for (int label = 0; label < 80; label++)
-            {
-                //LOGD("decode_infer label %d",label);
-                //LOGD("decode_infer score %f",scores[label]);
-                if (*(output+i*85+5+label) > score)
-                {
-                    score = *(output+i*85+5+label);
-                    cur_label = label;
-                }
-            }
-
-            float x = *(output+i*85+0)* 416.0f * w_scale;
-//            float x = *(output+i*85+0)*  w_scale;
-            float y = *(output+i*85+1)* 416.0f * h_scale;
-//            float y = *(output+i*85+1)* h_scale;
-            float w = *(output+i*85+2)* 416.0f * w_scale;
-//            float w = *(output+i*85+2)*  w_scale;
-            float h = *(output+i*85+3)* 416.0f * h_scale;
-//            float h = *(output+i*85+3)*  h_scale;
-
-            boxes.push_back(BoxInfo{
-                    (float)std::max(0.0, x-w/2.0),
-                    (float)std::max(0.0, y-h/2.0),
-                    (float)std::min((float)image.cols, (float)(x+w/2.0)),
-                    (float)std::min((float)image.rows, (float)(y+h/2.0)),
-                    *(output+i*85+4),
-                    cur_label
-            });
-//            std::cout << " x1: " << (float)std::max(0.0, x-w/2.0) <<
-//            " y1: " << (float)std::max(0.0, y-h/2.0) <<
-//            " x2: " << (float)std::min(320.0, x+w/2.0) <<
-//            " y2: " << (float)std::min(320.0, y+h/2.0) <<
-//            " socre: " << *(output+i*85+4) <<
-//            " label: " << cur_label << std::endl;
-        }
-    }
-
-    nms(boxes, 0.6);
+    nms(boxes, 0.2);
     for(auto &box: boxes){
         std::cout << " x1: " << box.x1 <<
                   " y1: " << box.y1 <<
@@ -377,7 +417,5 @@ int main() {
     }
     draw_coco_bboxes(image, boxes);
     cv::waitKey(0);
-
-
     return 0;
 }
