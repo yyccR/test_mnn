@@ -16,7 +16,8 @@ set_target_properties(mnn PROPERTIES IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DI
 add_library(mnn_express SHARED IMPORTED)
 set_target_properties(mnn_express PROPERTIES IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/mnn-2.2.0/libMNN_Express.dylib)
 
-add_executable(test_mnn ./yolox/main.cpp ./yolox/YOLOXMNN.cpp)
+#add_executable(test_mnn ./yolox/main.cpp ./yolox/YOLOXMNN.cpp)
+add_executable(test_mnn main.cpp)
 target_link_libraries(test_mnn mnn)
 target_link_libraries(test_mnn mnn_express)
 target_link_libraries(test_mnn ${OpenCV_LIBS})

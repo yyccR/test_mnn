@@ -209,18 +209,40 @@ void draw_coco_bboxes(const cv::Mat& bgr, const std::vector<BoxInfo>& bboxes)
     cv::imshow("image", image);
 }
 
+cv::Mat resize_padding(cv::Mat& origin_image, int target_h, int target_w, int constant_value = 114){
+    cv::Mat out_image(target_h, target_w, CV_8UC3);
+    int width = origin_image.cols, height = origin_image.rows;
+
+    if(width == target_h && height == target_w)
+    {
+        origin_image.copyTo(out_image);
+        return out_image;
+    }
+
+    memset(out_image.data, constant_value, target_h * target_w * 3);
+    float ratio = std::min((float)target_w /(float)width, (float)target_h / (float)height);
+    int new_width = (int)(ratio * (float )width), new_height = (int)(ratio * (float )height);
+
+    cv::Mat resize_image;
+    cv::resize(origin_image, resize_image, cv::Size(new_width, new_height));
+    // 深拷贝, resize_image替换rect_image的同时,也会替换out_image中的对应部分
+    cv::Mat rect_image = out_image(cv::Rect(0, 0, new_width, new_height));
+    resize_image.copyTo(rect_image);
+    return out_image;
+}
+
 
 int main() {
 
     std::string image_file = "/Users/yang/CLionProjects/test_mnn/data/images/img.jpg";
-//    std::string model_file = "/Users/yang/CLionProjects/test_mnn/yolox/yolox_tiny.mnn";
-    std::string model_file = "/Users/yang/CLionProjects/test_mnn/yolox/yolox-s_sim.mnn";
-    int input_size = 640;
+    std::string model_file = "/Users/yang/CLionProjects/test_mnn/yolox/yolox_tiny.mnn";
+//    std::string model_file = "/Users/yang/CLionProjects/test_mnn/yolox/yolox-s_sim.mnn";
+    int input_size = 416;
 
     auto mnnNet = std::shared_ptr<MNN::Interpreter>(MNN::Interpreter::createFromFile(model_file.c_str()));
     MNN::ScheduleConfig netConfig;
-    netConfig.type      = MNN_FORWARD_CPU;
-    netConfig.numThread = 4;
+//    netConfig.type      = MNN_FORWARD_CPU;
+//    netConfig.numThread = 4;
     MNN::Session* session = mnnNet->createSession(netConfig);
 
     float MEMORY = 0.0;
@@ -230,6 +252,8 @@ int main() {
     std::cout << MEMORY << " " << FLOPS << std::endl;
 
     MNN::Tensor* input = mnnNet->getSessionInput(session,NULL);
+    std::vector<int> in_shape = input->shape();
+
 //    const std::map<std::string, MNN::Tensor*> inputs = mnnNet->getSessionInputAll(session);
 //    for(auto &k : inputs){
 //        std::cout << k.first << std::endl;
@@ -251,19 +275,26 @@ int main() {
     cv::Mat image = cv::imread(image_file,1);
     float w_scale = (float)image.cols / (float)input_size;
     float h_scale = (float)image.rows / (float)input_size;
-    cv::Mat image_resize;
-    cv::resize(image, image_resize, cv::Size(input_size,input_size));
+    float ratio = std::min((float)input_size /(float)image.cols, (float)input_size / (float)image.rows);
+    cv::Mat image_resize = resize_padding(image, input_size, input_size);
+//    cv::Mat image_resize;
+//    cv::resize(image, image_resize, cv::Size(input_size,input_size));
 //    pretreat->convert(image_resize.data, 416, 416, image_resize.step[0], inputs.at("images"));
     image_resize.convertTo(image_resize, CV_32F, 1.0);
-    cv::Mat image_channels[3];
-    cv::split(image_resize, image_channels);
-
 
 //    auto nchw_tensor = new MNN::Tensor(inputs.at("images"), MNN::Tensor::CAFFE);
-    auto nchw_tensor = new MNN::Tensor(input, MNN::Tensor::CAFFE);
+    MNN::Tensor::DimensionType input_dimension_type = input->getDimensionType();
+    auto nchw_tensor = new MNN::Tensor(input, input_dimension_type);
     auto nchw_data   = nchw_tensor->host<float>();
-    for (int j = 0; j < 3; j++) {
-        memcpy(nchw_data + input_size*input_size * j, image_channels[j].data,input_size*input_size * sizeof(float));
+
+    if(input_dimension_type == MNN::Tensor::CAFFE){
+        cv::Mat image_channels[3];
+        cv::split(image_resize, image_channels);
+        for (int j = 0; j < 3; j++) {
+            memcpy(nchw_data + input_size*input_size * j, image_channels[j].data,input_size*input_size * sizeof(float));
+        }
+    }else{
+        memcpy(nchw_data, image_resize.data, input_size*input_size *3* sizeof(float));
     }
 
 //    inputs.at("images")->copyFromHostTensor(nchw_tensor);
@@ -271,29 +302,32 @@ int main() {
 
     mnnNet->runSession(session);
 
-    const std::map<std::string, MNN::Tensor*> outputs = mnnNet->getSessionOutputAll(session);
-    auto output_tensor = outputs.at("output");
-    auto output = output_tensor->host<float>();
-    std::cout << output[0] << std::endl;
-    for(auto &k : outputs){
-        std::cout << k.first << std::endl;
-        for(auto &s : k.second->shape()){
-            std::cout << s << std::endl;
-        }
-    }
+//    const std::map<std::string, MNN::Tensor*> outputs = mnnNet->getSessionOutputAll(session);
+//    auto output_tensor = outputs.at("output");
+    auto output_tensor = mnnNet->getSessionOutput(session, NULL);
+    MNN::Tensor output_format_tensor = MNN::Tensor(output_tensor,output_tensor->getDimensionType());
+    output_tensor->copyToHostTensor(&output_format_tensor);
+    auto output = output_format_tensor.host<float>();
+//    std::cout << output[0] << std::endl;
+//    for(auto &k : outputs){
+//        std::cout << k.first << std::endl;
+//        for(auto &s : k.second->shape()){
+//            std::cout << s << std::endl;
+//        }
+//    }
     std::vector<BoxInfo> boxes;
     std::vector<YoloXAnchor> anchors;
     std::vector<int> strides = {8, 16, 32};
     generate_anchors(input_size, input_size, strides, anchors);
     int num_classes = 80;
-    float score_threshold = 0.6;
-    std::cout<< "------start" << std::endl;
-    for(int i = 0; i < 85; i++){
-        std::cout << i << " " <<  *(output+i) << std::endl;
-    }
-    std::cout<< "------end" << std::endl;
+    float score_threshold = 0.3;
+//    std::cout<< "------start" << std::endl;
+//    for(int i = 0; i < 85; i++){
+//        std::cout << i << " " <<  *(output+i) << std::endl;
+//    }
+//    std::cout<< "------end" << std::endl;
 
-    for (unsigned int i = 0; i < 8400; ++i){
+    for (unsigned int i = 0; i < 3549; ++i){
         const float *offset_obj_cls_ptr = output + (i * (num_classes + 5)); // row ptr
         float obj_conf = *(offset_obj_cls_ptr+4);
         if (obj_conf < score_threshold) continue; // filter first.
@@ -329,10 +363,10 @@ int main() {
         float cy = (dy + (float) grid1) * (float) stride;
         float w = std::exp(dw) * (float) stride;
         float h = std::exp(dh) * (float) stride;
-        float x1 = (cx - w / 2.f);
-        float y1 = (cy - h / 2.f);
-        float x2 = (cx + w / 2.f);
-        float y2 = (cy + h / 2.f);
+        float x1 = (cx - w / 2.f) / ratio;
+        float y1 = (cy - h / 2.f) / ratio;
+        float x2 = (cx + w / 2.f) / ratio;
+        float y2 = (cy + h / 2.f) / ratio;
 
         BoxInfo box;
         box.x1 = std::max(0.f, x1);
@@ -406,7 +440,7 @@ int main() {
 //        }
 //    }
 
-    nms(boxes, 0.2);
+    nms(boxes, 0.3);
     for(auto &box: boxes){
         std::cout << " x1: " << box.x1 <<
                   " y1: " << box.y1 <<
